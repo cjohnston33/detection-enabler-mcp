@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "detection-enabler": {
+      "command": "uv",
+      "args": ["run", "detection-enabler", "serve"]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env.approver)",
+      "Edit(./.env.approver)",
+      "Bash(cat .env.approver:*)",
+      "Bash(uv run detection-enabler approve:*)",
+      "Bash(detection-enabler approve:*)"
+    ]
+  }
+}

@@ -1,0 +1,71 @@
+# Local single-node Elastic Stack for developing detection-enabler-mcp.
+# NOT for production: no TLS on HTTP, single node, dev passwords from .env.
+name: detection-enabler-dev
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    environment:
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.authc.api_key.enabled=true
+      - xpack.license.self_generated.type=${LICENSE}
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "127.0.0.1:${ES_PORT}:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # One-shot: set the kibana_system password so Kibana can log in to ES.
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - bash
+      - -c
+      - >-
+        until curl -s -o /dev/null -w "%{http_code}" -u "elastic:${ELASTIC_PASSWORD}"
+        -X POST -H "Content-Type: application/json"
+        http://elasticsearch:9200/_security/user/kibana_system/_password
+        -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q 200; do sleep 2; done;
+        echo "kibana_system password set"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      # Alerting / detection engine need stable encryption keys.
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY}
+      - XPACK_SECURITY_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY}
+      - TELEMETRY_OPTIN=false
+    ports:
+      - "127.0.0.1:${KIBANA_PORT}:5601"
+    volumes:
+      - kibanadata:/usr/share/kibana/data
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  esdata:
+  kibanadata:

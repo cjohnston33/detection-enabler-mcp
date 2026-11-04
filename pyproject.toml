@@ -1,0 +1,63 @@
+[project]
+name = "detection-enabler-mcp"
+version = "0.1.0"
+description = "MCP server that checks whether a detection rule will actually work, and enables it only with human approval."
+readme = "README.md"
+authors = [
+    { name = "Carissa Johnston", email = "carissajohnston33@gmail.com" }
+]
+requires-python = ">=3.12"
+license = "Apache-2.0"
+keywords = ["mcp", "elastic", "kibana", "detection-engineering", "siem", "security"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "httpx>=0.28",
+    "mcp>=2.3",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+]
+
+[project.scripts]
+detection-enabler = "detection_enabler_mcp.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+    "respx>=0.23.1",
+    "ruff>=0.17.3",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101", "E501"]  # formatter handles wrapping
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]
+"scripts/*" = ["S311"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+# Elastic responses are untyped JSON; returning them is expected.
+warn_return_any = false
