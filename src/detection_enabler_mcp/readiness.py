@@ -15,7 +15,7 @@ Only aggregates are returned. Raw log content never leaves this module.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -79,10 +79,22 @@ class FieldCheck(BaseModel):
 
 
 class VolumeCheck(BaseModel):
+    """Result of Kibana's rule preview.
+
+    The preview window is a little longer than ``lookback_hours``: the first simulated run
+    also searches the rule's extra lookback (``from`` minus ``interval``, e.g. 6m - 5m = 1m).
+    ``source_docs_in_window`` is counted over exactly the same window, so for a simple query
+    rule ``alerts_in_window`` can never exceed it.
+    """
+
     ran: bool
     alerts_in_window: int | None = None
     alerts_per_day: float | None = None
     invocations: int | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    window_hours: float | None = None
+    source_docs_in_window: int | None = None
     errors: list[dict[str, Any]] = []
 
 
@@ -112,6 +124,24 @@ def parse_interval_seconds(value: str | None, default: int = 300) -> int:
         return default
     m = _DURATION.match(value.strip())
     return int(m.group(1)) * _UNIT_SECONDS[m.group(2)] if m else default
+
+
+_RELATIVE_FROM = re.compile(r"^now-(\d+)([smhd])$")
+
+
+def parse_from_seconds(value: str | None, default: int) -> int:
+    """How far back each rule run searches, from the rule's ``from`` (e.g. ``now-6m`` -> 360)."""
+    m = _RELATIVE_FROM.match((value or "").strip())
+    return int(m.group(1)) * _UNIT_SECONDS[m.group(2)] if m else default
+
+
+def es_time(dt: datetime) -> str:
+    """Millisecond-precision UTC timestamp in the format Kibana and Elasticsearch accept."""
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+def time_range(start: datetime, end: datetime) -> dict[str, Any]:
+    return {"range": {"@timestamp": {"gte": es_time(start), "lte": es_time(end)}}}
 
 
 _QUOTED = re.compile(r'"(?:\\.|[^"\\])*"' + r"|'(?:\\.|[^'\\])*'")
@@ -151,6 +181,8 @@ async def check_readiness(
     estimate_volume: bool = True,
 ) -> ReadinessReport:
     rule_type = rule.get("type", "unknown")
+    # One fixed "now" for every query, so the count and the preview can't drift apart.
+    end = datetime.now(UTC).replace(microsecond=0)
     patterns: list[str] = list(rule.get("index") or [])
     if not patterns and rule.get("data_view_id"):
         patterns = [p.strip() for p in (await es.data_view_pattern(rule["data_view_id"])).split(",")]
@@ -168,7 +200,7 @@ async def check_readiness(
         index_patterns=[safe_identifier(p) for p in patterns],
         matched_indices=[],
         lookback_hours=lookback_hours,
-        checked_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        checked_at=end.isoformat(timespec="seconds"),
     )
     reasons = report.reasons
 
@@ -190,7 +222,7 @@ async def check_readiness(
         return report
 
     # 2. Data is flowing
-    window = {"range": {"@timestamp": {"gte": f"now-{lookback_hours}h"}}}
+    window = time_range(end - timedelta(hours=lookback_hours), end)
     report.docs_in_window = await es.count(patterns, window)
     if report.docs_in_window == 0:
         report.verdict = Verdict.NO_RECENT_DATA
@@ -244,7 +276,7 @@ async def check_readiness(
 
     # 4. Volume is sane
     if estimate_volume:
-        report.volume = await _estimate_volume(es, rule, lookback_hours)
+        report.volume = await _estimate_volume(es, rule, patterns, lookback_hours, end)
         if report.volume.ran and report.volume.alerts_per_day is not None:
             if report.volume.alerts_per_day > noisy_alerts_per_day and report.verdict == Verdict.READY:
                 report.verdict = Verdict.NOISY
@@ -261,14 +293,19 @@ async def check_readiness(
     return report
 
 
-async def _estimate_volume(es: ReadOnlyElastic, rule: dict[str, Any], lookback_hours: int) -> VolumeCheck:
+async def _estimate_volume(
+    es: ReadOnlyElastic, rule: dict[str, Any], patterns: list[str], lookback_hours: int, end: datetime
+) -> VolumeCheck:
     interval = parse_interval_seconds(rule.get("interval"))
     invocations = max(1, min(MAX_PREVIEW_INVOCATIONS, (lookback_hours * 3600) // interval))
-    covered_hours = invocations * interval / 3600
+    # Each run searches `from` seconds back, which is usually a bit more than `interval`
+    # (Kibana's default is now-6m on a 5m schedule). Overlap between runs is de-duplicated,
+    # so the only extra coverage is the first run's look-back before the scheduled window.
+    extra = max(0, parse_from_seconds(rule.get("from"), default=interval) - interval)
+    start = end - timedelta(seconds=invocations * interval + extra)
+    window_hours = (end - start).total_seconds() / 3600
     try:
-        result = await es.preview_rule(
-            preview_body(rule), invocations, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        )
+        result = await es.preview_rule(preview_body(rule), invocations, es_time(end))
     except ElasticError as e:
         return VolumeCheck(ran=False, errors=[{"status": e.status, "message": untrusted_text(str(e))}])
 
@@ -284,7 +321,11 @@ async def _estimate_volume(es: ReadOnlyElastic, rule: dict[str, Any], lookback_h
     return VolumeCheck(
         ran=True,
         alerts_in_window=alerts,
-        alerts_per_day=round(alerts * 24 / covered_hours, 1),
+        alerts_per_day=round(alerts * 24 / window_hours, 1),
         invocations=invocations,
+        window_start=es_time(start),
+        window_end=es_time(end),
+        window_hours=round(window_hours, 3),
+        source_docs_in_window=await es.count(patterns, time_range(start, end)),
         errors=errors[:10],
     )

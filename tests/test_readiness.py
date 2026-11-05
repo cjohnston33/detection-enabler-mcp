@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -8,8 +9,10 @@ from conftest import FakeElastic, make_rule
 from detection_enabler_mcp.readiness import (
     Verdict,
     check_readiness,
+    es_time,
     esql_indices,
     extract_query_fields,
+    parse_from_seconds,
     parse_interval_seconds,
     preview_body,
     types_compatible,
@@ -40,6 +43,46 @@ def test_esql_indices() -> None:
 )
 def test_parse_interval(value: str | None, seconds: int) -> None:
     assert parse_interval_seconds(value) == seconds
+
+
+@pytest.mark.parametrize(
+    ("value", "seconds"), [("now-6m", 360), ("now-1h", 3600), (None, 300), ("now-6m+1s", 300)]
+)
+def test_parse_from(value: str | None, seconds: int) -> None:
+    assert parse_from_seconds(value, default=300) == seconds
+
+
+def test_es_time_has_millis_and_z() -> None:
+    assert es_time(datetime(2026, 11, 4, 6, 41, 5, 330_000, tzinfo=UTC)) == "2026-11-04T06:41:05.330Z"
+
+
+@pytest.mark.parametrize(
+    ("interval", "from_", "extra_minutes"),
+    [("5m", "now-6m", 1), ("5m", "now-5m", 0), ("1h", "now-70m", 10), ("5m", None, 0)],
+)
+async def test_volume_window_includes_first_runs_extra_lookback(
+    interval: str, from_: str | None, extra_minutes: int
+) -> None:
+    """Regression: the preview's first run searches `from - interval` before the 24h window.
+
+    Measured on Kibana 9.5.6: preview alerts == docs in [end - 24h - (from - interval), end].
+    """
+    es = FakeElastic(field_types={"process.name": "keyword"}, preview_alerts=97)
+    report = await run(es, make_rule(interval=interval, **({"from": from_} if from_ else {})))
+    vol = report.volume
+    assert vol and vol.window_start and vol.window_end and vol.window_hours
+    start, end = (
+        datetime.fromisoformat(t.replace("Z", "+00:00")) for t in (vol.window_start, vol.window_end)
+    )
+    assert end - start == timedelta(hours=24, minutes=extra_minutes)
+    assert vol.window_hours == pytest.approx(24 + extra_minutes / 60, abs=1e-3)
+    assert vol.alerts_per_day == round(97 * 24 / (24 + extra_minutes / 60), 1)
+
+    # One shared "now": preview end, the volume doc count, and the 24h freshness count agree.
+    assert es.preview_calls[0]["timeframe_end"] == vol.window_end
+    freshness, *_, volume_docs = es.count_queries
+    assert freshness["range"]["@timestamp"]["lte"] == vol.window_end
+    assert volume_docs["range"]["@timestamp"] == {"gte": vol.window_start, "lte": vol.window_end}
 
 
 def test_types_compatible() -> None:

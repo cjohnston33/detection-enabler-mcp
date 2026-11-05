@@ -29,7 +29,8 @@ class FakeElastic(ReadOnlyElastic):
         self.field_types = field_types or {}
         self.field_counts = field_counts or {}
         self.preview_alerts = preview_alerts
-        self.enable_calls: list[str] = []
+        self.count_queries: list[dict[str, Any]] = []
+        self.preview_calls: list[dict[str, Any]] = []
 
     async def aclose(self) -> None:
         pass
@@ -46,6 +47,7 @@ class FakeElastic(ReadOnlyElastic):
         return self.indices
 
     async def count(self, patterns: list[str], query: dict[str, Any]) -> int:
+        self.count_queries.append(query)
         if "bool" in query:  # exists-query for a field
             field = query["bool"]["filter"][1]["exists"]["field"]
             return self.field_counts.get(field, self.docs_in_window)
@@ -57,6 +59,7 @@ class FakeElastic(ReadOnlyElastic):
     async def preview_rule(
         self, rule: dict[str, Any], invocation_count: int, timeframe_end: str
     ) -> dict[str, Any]:
+        self.preview_calls.append({"invocation_count": invocation_count, "timeframe_end": timeframe_end})
         return {"previewId": "p1", "logs": []}
 
     async def count_preview_alerts(self, preview_id: str) -> int:
