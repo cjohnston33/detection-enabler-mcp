@@ -6,6 +6,8 @@ human approval**.
 
 > **Status:** early alpha (MVP in progress). Elastic Security only for now.
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/cjohnston33-detection-enabler-mcp-50hez1?v=50ab6dd59deb00b746de1858bee9e518)](https://m8ven.ai/mcp/cjohnston33-detection-enabler-mcp-50hez1?s=readme)
+
 ## The problem
 
 Detection rules often go live without the data they depend on. They quietly never fire,
