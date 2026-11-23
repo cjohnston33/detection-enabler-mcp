@@ -23,6 +23,23 @@ async def test_no_tool_can_enable_or_approve(settings: ReaderSettings, store: Ap
     assert names == {"list_rules", "check_rule_readiness", "request_rule_enable", "get_enable_request"}
 
 
+async def test_every_tool_declares_all_four_hints(settings: ReaderSettings, store: ApprovalStore) -> None:
+    """Directories such as OpenAI's reject tools with any hint missing or non-boolean."""
+    async with Client(server(settings, store)) as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+    hints = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+    declared = {
+        name: t.annotations.model_dump(by_alias=True, exclude_none=True) if t.annotations else {}
+        for name, t in tools.items()
+    }
+    for name, ann in declared.items():
+        for h in hints:
+            assert isinstance(ann.get(h), bool), f"{name} is missing {h}"
+    # Only request_rule_enable writes anything, and nothing is destructive or open-world.
+    assert {n for n, a in declared.items() if not a["readOnlyHint"]} == {"request_rule_enable"}
+    assert not any(a["destructiveHint"] or a["openWorldHint"] for a in declared.values())
+
+
 async def test_request_flow_creates_pending_request(settings: ReaderSettings, store: ApprovalStore) -> None:
     async with Client(server(settings, store)) as c:
         r = await c.call_tool("request_rule_enable", {"rule_id": "r1", "justification": "good rule"})

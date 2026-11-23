@@ -38,7 +38,17 @@ def build_server(
     es = es or ReadOnlyElastic(settings)
     store = store or ApprovalStore(state_dir())
     mcp = MCPServer("detection-enabler", instructions=INSTRUCTIONS)
-    read_only = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    # Every tool declares all four hints explicitly; some directories reject a tool if any
+    # are missing. open_world_hint is False everywhere: the tools only reach the configured
+    # Elastic cluster and the local approval store, never arbitrary external systems.
+    read_only = ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+    )
+    # Files a pending request in the local store; repeating it returns the existing pending
+    # request rather than filing a second one, and it never changes the rule itself.
+    files_request = ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+    )
 
     async def _rule(rule_id: str) -> dict[str, Any]:
         return await es.get_rule(rule_id)
@@ -86,7 +96,7 @@ def build_server(
         )
         return report.model_dump(mode="json")
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True))
+    @mcp.tool(annotations=files_request)
     async def request_rule_enable(rule_id: str, justification: str) -> dict[str, Any]:
         """Ask a human to enable a rule. Re-runs the readiness check and files a pending
         request. This does NOT enable the rule. Rules that are not 'ready' are refused.
